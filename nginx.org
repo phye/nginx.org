@@ -1,0 +1,211 @@
+#+title: Understanding Nginx
+#+author: Philip Ye (phye8080@gmail.com)
+#+setupfile: "~/.emacs.d/misc/include.org"
+
+* Core
+
+** Nginx Basic Data Structures
+
+*** [[file:~/ws/nginx/src/core/ngx_array.h::typedef%20struct%20{][ngx_array_t]]
+    Nginx's dynamic length array implementation
+    #+begin_src c
+    typedef struct {
+        void       *elts;
+        ngx_uint_t  nelts;
+        size_t      size;
+        ngx_uint_t  nalloc;
+        ngx_pool_t *poll;
+    } ngx_array_t;
+    #+end_src
+
+**** [[file:~/ws/nginx/src/core/ngx_array.h::ngx_array_init(ngx_array_t%20*array,%20ngx_pool_t%20*pool,%20ngx_uint_t%20n,%20size_t%20size)][ngx_array_init(ngx_array_t *array, ngx_pool_t *pool, ngx_uint_t n, size_t size)]]
+     :PROPERTIES:
+     :scope:    static
+     :END:
+     Static method which may not be used by other structs directly
+
+**** [[file:~/ws/nginx/src/core/ngx_array.c::ngx_array_create(ngx_pool_t%20*p,%20ngx_uint_t%20n,%20size_t%20size)][ngx_array_create(ngx_pool_t *p, ngx_uint_t n, size_t size)]]
+     :PROPERTIES:
+     :scope:    external
+     :END:
+     Allocate ~sizeof(ngx_array_t)~ for header, ~ngx_array_t~ and
+     ~n*size~ bytes for payload 
+
+**** [[file:~/ws/nginx/src/core/ngx_array.c::ngx_array_destroy(ngx_array_t%20*a)][ngx_array_destroy(ngx_array_t *a)]]
+     :PROPERTIES:
+     :scope:    external
+     :END:      
+     Destroy _a_, so that all elements of _a_ should not be used
+     later. 
+
+     Note that there're no delete logic in this method, Simply
+     maintain ~a->pool->d.last~ according to current ~a->pool->d.last~
+     and the no. of elements in ~a~ 
+     
+**** [[file:~/ws/nginx/src/core/ngx_array.c::ngx_array_push(ngx_array_t%20*a)][ngx_array_push(ngx_array_t *a)]]
+     :PROPERTIES:
+     :scope:    external
+     :END:
+     Return a slot in ~a~ for new element to be pushed
+
+     If there're enough space in ~a->pool~, simply extend
+     ~a->pool->d.last~ with ~a->size~; Otherwise, allocate
+     ~2 * a->size * a->nalloc~ bytes memory and copy all elements to
+     the newly allocated buffer. 
+     
+     FIXME: In the second case, how is the existing buffer handled
+     after all elements been moved to new buffer? 
+
+     TODO: understand ~ngx_palloc~ for possible memory leak
+
+**** [[file:~/ws/nginx/src/core/ngx_array.c::ngx_array_push_n(ngx_array_t%20*a,%20ngx_uint_t%20n)][ngx_array_push_n(ngx_array_t *a, ngx_uint_t n)]]
+     :PROPERTIES:
+     :scope:    external
+     :END:
+     Return new slots in ~a~ for ~n~ new elements to be pushed to the
+     array 
+
+     Similar logic for memory handling with ~ngx_array_push~, omitted
+     here 
+
+*** [[file:~/ws/nginx/src/core/ngx_buf.h::struct%20ngx_buf_s%20{][ngx_buf_t]]
+    The actual *famous* buffer struct, with various bits such as:
+      - temporary :: *RW*, the buf's content could be changed
+      - memory :: *RO*, the buf's content is in a memory cache or in a read
+                  only memory
+      - mmap :: *RO*, the buf's content is ~mmaped()~ and must not be
+                changed
+      - recycled ::
+      - in_file :: the buf's content is in file or not
+      - flush ::
+      - sync ::
+      - last_buf ::
+      - last_in_chain ::
+      - last_shadow ::
+      - temp_file ::
+
+      #+begin_src c
+      struct ngx_buf_s {
+          u_char *pos;
+          u_char *last;
+          off_t file_pos;
+          off_t file_last;
+
+          u_char *start;
+          u_char *end;
+          ngx_buf_tag_t tg;
+          ngx_file_t *file;
+          ngx_buf_t *shadow;
+
+          /* And various flags mentioned above */
+      };
+      #+end_src
+
+**** [[file:~/ws/nginx/src/core/ngx_buf.h::#define%20ngx_buf_in_memory(b)%20(b->temporary%20||%20b->memory%20||%20b->mmap)][#define ngx_buf_in_memory(b) (b->temporary || b->memory || b->mmap)]]
+     :PROPERTIES:
+     :macro:    true
+     :END:
+     Return if ~b~ is currently in memory
+
+**** [[file:~/ws/nginx/src/core/ngx_buf.h::#define%20ngx_buf_in_memory_only(b)%20(ngx_buf_in_memory(b)%20&&%20!b->in_file)][#define ngx_buf_in_memory_only(b) (ngx_buf_in_memory(b) && !b->in_file)]]
+     :PROPERTIES:
+     :macro:    true
+     :END:
+     Return if ~b~ is in memory only not in file 
+
+**** [[file:~/ws/nginx/src/core/ngx_buf.h::#define%20ngx_buf_special(b)%20\][#define ngx_buf_special(b) \]]
+     :PROPERTIES:
+     :macro:    true
+     :END:
+     Return if ~b~ is special 
+     
+     Any of _flush_, _last_buf_, or _sync_ buf is set and buf's
+     content is not related to file 
+
+**** [[file:~/ws/nginx/src/core/ngx_buf.h::#define%20ngx_buf_size(b)%20\][#define ngx_buf_size(b) \]]
+     :PROPERTIES:
+     :macro:    true
+     :END:
+     Return buf size 
+
+     If ~b~ is in memory, return ~b->last-b->pos~, otherwise, return
+     ~b->file_last-b->file_pos~ 
+
+     
+**** [[file:~/ws/nginx/src/core/ngx_buf.c::ngx_create_temp_buf(ngx_pool_t%20*pool,%20size_t%20size)][ngx_create_temp_buf(ngx_pool_t *pool, size_t size)]]
+     Allocate ~sizeof(ngx_buf_t) + size~ bytes from ~pool~ and init
+     fields in ~ngx_buf_t~ accordingly and return it
+
+*** [[file:~/ws/nginx/src/core/ngx_buf.h::struct%20ngx_chain_s%20{][ngx_chain_t]]
+    Singlely linked list of ~ngx_buf_t~ which forms a *buffer chain*
+    #+begin_src c
+    struct ngx_chain_s {
+        ngx_buf_t    *buf;
+        ngx_chaint_t *next;
+    };
+    #+end_src
+    
+**** [[file:~/ws/nginx/src/core/ngx_buf.c::ngx_alloc_chain_link(ngx_pool_t%20*pool)][ngx_alloc_chain_link(ngx_pool_t *pool)]]
+     Return a ~ngx_chain_t~ ptr with properly allocated memory 
+
+     If there're available entries in the chain list in ~pool->chain~,
+     return that from the head of the list, 
+     
+
+*** [[file:~/ws/nginx/src/core/ngx_buf.h::typedef%20struct%20{][ngx_bufs_t]]
+    A simple struct for storing size info of an array of buffers 
+    #+begin_src c
+    typedef struct {
+        ngx_int_t num;
+        size_t    size;
+    } ngx_bufs_t;
+    #+end_src
+
+*** [[file:~/ws/nginx/src/core/ngx_buf.h::struct%20ngx_output_chain_ctx_s%20{][ngx_output_chain_ctx_t]] 
+    TODO: Specify usage 
+    
+    #+begin_src c
+    struct ngx_output_chain_ctx_s {
+        ngx_buf_t                  *buf;
+        ngx_chain_t                *in;
+        ngx_chain_t                *free;
+        ngx_chain_t                *busy;
+
+        unsigned                    sendfile:1;
+        unsigned                    directio:1;
+        unsigned                    unaligned:1;
+        unsigned                    need_in_memory:1;
+        unsigned                    need_in_tem:1;
+        unsigned                    aio:1;
+
+    #if (NGX_HAVE_FILE_AIO || NGX_COMPAT)
+        ngx_output_chain_aio_pt     aio_handler;
+    #if (NGX_HAVE_AIO_SENDFILE || NGX_COMPAT)
+        ssize_t (*aio_preload)(ngx_buf_t *file);
+    #endif
+    #endif
+
+        off_t                       alignment;
+
+        ngx_pool_t                 *pool;
+        ngx_int_t                   allocated;
+        ngx_bufs_t                  bufs;
+        ngx_buf_tag_t               tag;
+
+        ngx_output_chain_filter_pt  output_filter;
+        void                       *filter_ctx;
+    };
+    #+end_src
+
+
+*** [[file:~/ws/nginx/src/core/ngx_buf.h::typedef%20struct%20{][ngx_chain_writer_ctx_t]] 
+    
+    #+begin_src c
+    typedef struct {
+        ngx_chain_t       *out;
+        ngx_chain_t      **last;
+        ngx_connection_t  *connection;
+        ngx_pool_t        *pool;
+        off_t              limit;
+    } ngx_chain_writer_ctx_t;
+    #+end_src
